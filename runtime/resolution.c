@@ -91,6 +91,13 @@ static int dlss_dll(void) {
 #endif
 }
 
+// Whether the engine aa_engine picks can scale the scene up: FSR 3.1 (fsr3, or auto without DLSS) runs on any GPU and
+// needs no file; dlss needs the DLL (dlss_dll).
+static int engine_ready(void) {
+    if (!strcmp(cfg_value("TOTK_AA_ENGINE"), "dlss")) return dlss_dll();
+    return 1;
+}
+
 // The scene size for a share k of the output, within SCENE_MAX per side.
 static void scene_for(double k, unsigned *w, unsigned *h) {
     double sw = R.ow * k, sh = R.oh * k;
@@ -108,7 +115,7 @@ static double dlss_share(const char *m) {
     if (!cfg_bool("TOTK_DLAA")) return 0;
     for (int i = 0; i < (int)(sizeof dlss / sizeof dlss[0]); i++)
         if (!strcmp(m, dlss[i].name)) {
-            if (dll < 0 && !(dll = dlss_dll())) {
+            if (dll < 0 && !(dll = engine_ready())) {
 #ifdef _WIN32
                 rt_log("resolution: DLSS %s needs nvngx_dlss.dll next to totk.exe, which is missing: the scene follows "
                        "render_scale", m);
@@ -173,7 +180,7 @@ static void decide(void) {
     // for the largest scene the modes ask for. Everyone else keeps the game's own scene size and its dynamic resolution
     // unless render_scale or a DLSS mode asks for another, and a heap sized for that scene alone.
     R.base_k = k;
-    R.live = RT_V143 && cfg_bool("TOTK_DLAA") && dlss_dll();
+    R.live = RT_V143 && cfg_bool("TOTK_DLAA") && engine_ready();
     const char *m = cfg_value("TOTK_DLSS");
     R.dlss_k = dlss_share(m);
     if (R.dlss_k) rt_log("resolution: DLSS %s: the scene at %.0f %% of the output (render_scale ignored)", m, R.dlss_k * 100);
