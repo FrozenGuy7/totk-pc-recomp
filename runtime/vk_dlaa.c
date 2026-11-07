@@ -989,7 +989,8 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
             D.fsr = 1, D.reset = 1;   // no FSR 4 (fsr4_failed now holds): FSR 3.1 from this frame on
         if (D.fsr == 2) {
             int size_only = !reset_before && D.why[1] == camera_resets && D.why[2] == target_resets;
-            Fsr4Frame fr = {.color = t->image, .depth = z->image, .jx = jx, .jy = jy, .reset = D.reset && !size_only};
+            Fsr4Frame fr = {.color = t->image, .depth = z->image, .jx = jx, .jy = jy, .reset = D.reset && !size_only,
+                            .frame = ex->fence};
             if (fsr4_dispatch(e->fsr4, cb, &fr)) goto engine_done;
             D.fsr = 1, D.reset = 1;   // FSR 4 refused the frame (fsr4_failed now holds): FSR 3.1 from this frame on
         }

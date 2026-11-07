@@ -34,6 +34,7 @@ typedef struct {
                             // depth, both in VK_IMAGE_LAYOUT_GENERAL
     float jx, jy;           // the jitter the scene was drawn with, render pixels
     int reset;              // start a new history
+    uint64_t frame;         // the submission's timeline value (VkExec.fence): the dispatch waits for older ones (vk_fsr4.c)
 } Fsr4Frame;
 
 // Records the upscale into cb, writing the context's out image (no render pass open; the recorder drained). 1 on success.

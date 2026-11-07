@@ -126,6 +126,14 @@ static void message(uint32_t type, const wchar_t *text) {
 
 enum { IN_COLOR, IN_DEPTH, NOWN };
 
+// The SDK's Vulkan back end (Kits/FidelityFX/backend/vk/ffx_vk.cpp, ExecuteGpuJobsVK) makes image views of the images it
+// is given at every dispatch and destroys them three dispatches later (FFX_MAX_QUEUED_FRAMES 4); its descriptor sets and
+// constants rotate the same way. It assumes the GPU is never more dispatches behind. TotK's frames can run further ahead
+// at a high frame rate (asynchronous replay, split submissions), and then the GPU read views and memory already gone (a
+// GPU page fault, or an access violation in the driver). So a dispatch first waits until the submission of the dispatch
+// IN_FLIGHT back is done: the views it destroys at its end are that dispatch's.
+enum { IN_FLIGHT = 3 };
+
 // One FSR context for the run, made with the largest render and output size seen and FSR's dynamic resolution flag:
 // TotK's dynamic resolution moves the scene size every few frames, and each frame passes the size it has. A second
 // context per scene size (what vk_fsr3.c does) ended in a GPU page fault with the FSR 4 provider. The copies of the
@@ -141,6 +149,9 @@ static struct {
     int fresh;                      // made since the last dispatch: its history starts empty
     int users;                      // live Fsr4 handles (vk_dlaa.c's scene sizes)
     uint64_t last_ns;               // plat_now_ns of the previous dispatch (frameTimeDelta)
+    uint64_t fence[IN_FLIGHT];      // the timeline values of the last dispatches' submissions (a ring)
+    uint32_t dispatches;            // dispatches recorded so far
+    uint64_t waits, wait_ns;        // dispatches that waited for an older one, and how long in all
 } G;
 
 struct Fsr4 {                       // one per vk_dlaa.c scene size: its size and work images
@@ -303,6 +314,17 @@ static struct FfxApiResource resource(VkImage img, uint32_t format, uint32_t w, 
 
 int fsr4_dispatch(Fsr4 *f, VkCommandBuffer cb, const Fsr4Frame *in) {
     if (!G.ctx || f->w > G.mw || f->h > G.mh || f->ow != G.ow || f->oh != G.oh) return 0;   // fsr4_create keeps it fitting
+    uint64_t old = G.dispatches >= IN_FLIGHT ? G.fence[G.dispatches % IN_FLIGHT] : 0;
+    if (old && old < in->frame && vk_sync_fence_done() < old) {
+        uint64_t t0 = plat_now_ns();
+        if (!vk_sync_fence_wait(old, 2000000000ull)) rt_log("fsr4: submission %llu not done after 2 s",
+                                                             (unsigned long long)old);
+        G.waits++, G.wait_ns += plat_now_ns() - t0;
+    }
+    G.fence[G.dispatches++ % IN_FLIGHT] = in->frame;
+    if (G.dispatches == 600 || G.dispatches % 36000 == 0)
+        rt_log("fsr4: %u dispatches; %llu waited for the GPU to finish an older one (%.2f ms in all)", G.dispatches,
+               (unsigned long long)G.waits, G.wait_ns / 1e6);
     if (!G.general) {   // the context's own images start in UNDEFINED; they live in GENERAL like every other image
         layouts(cb, G.img, NOWN, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         G.general = 1;
