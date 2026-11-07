@@ -2,6 +2,20 @@
 
 **TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native x86-64 application for Windows and Linux ([docs/architecture.md](docs/architecture.md)).
 
+> [!NOTE]
+> **This is an unofficial fork with AMD FSR 3.1 and FSR 4 (ML) upscaling**, built on TotK Recomp 0.3.13 (branch
+> `fsr-0313`). It adds two engines to the DLSS / DLAA point: `fsr3` (FSR 3.1, any GPU, from
+> [pull request #228](https://github.com/valentderah/totk-pc-recomp/pull/228)) and `fsr4` (AMD's ML upscaler through
+> the FSR SDK 2.4; the FP8 model on Radeon RX 9000). Tested on an RX 9070 XT with the AMD Windows driver: every quality
+> mode, switched live from the F1 menu. Report problems with these engines on this fork, not upstream.
+>
+> To use FSR 4: in `totk.ini` set `dlaa = 1` and `aa_engine = fsr4`, pick the mode with `dlss =` (dlaa, quality,
+> balanced, performance or ultra_performance), and put AMD's `amd_fidelityfx_loader_vk.dll` and
+> `amd_fidelityfx_upscaler_vk.dll` (FidelityFX SDK 2.4, `Kits/FidelityFX/signedbin`, with AMD's licence file) next to
+> `totk.exe`. Without them, or on a GPU the provider does not support, FSR 3.1 runs instead and `logs/totk.log` says why.
+> Building it needs the SDK's ffx-api headers in the deps folder at `include/ffx/api/include` and
+> `include/ffx/upscalers/include`.
+
 > [!IMPORTANT]
 > **No game files are included.** You need your own legally obtained copy of *Tears of the Kingdom*, dumped from your own console: the base game and the 1.1.0, 1.2.1 or 1.4.3 update. Instructions for obtaining those files will not be provided.
 >
