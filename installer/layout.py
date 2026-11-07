@@ -136,7 +136,10 @@ def release_layout(root):
         runtime_lib_v2=root / 'runtime' / 'libtotkrt-v2.a',
         ninja=root / 'bin' / ('ninja' + EXE), hactool=root / 'bin' / ('hactool' + EXE),
         xlate=root / 'bin' / ('totk_xlate' + EXE),
-        dlls=(root / 'bin' / 'SDL3.dll', root / 'bin' / 'libopus-0.dll') if WIN else (root / 'bin' / 'libSDL3.so.0',),
+        # AMD's signed FSR SDK DLLs for aa_engine = fsr4 (runtime/vk_fsr4.c loads them from the folder of totk.exe)
+        # go along when bin/ has them; without them FSR 3.1 runs in FSR 4's place
+        dlls=(root / 'bin' / 'SDL3.dll', root / 'bin' / 'libopus-0.dll',
+              *sorted((root / 'bin').glob('amd_fidelityfx_*_vk.dll'))) if WIN else (root / 'bin' / 'libSDL3.so.0',),
         shader_list=root / 'data' / 'shader_list.tsv', ini_example=root / 'totk.ini.example',
         pgo_dir=root / 'data' if WIN else None,
         # Linux: None, the install folder's .setup-temp (installer/cli.py): the AppImage is mounted read-only, and on
