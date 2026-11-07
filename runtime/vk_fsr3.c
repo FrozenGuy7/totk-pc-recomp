@@ -202,6 +202,7 @@ int fsr3_dispatch(Fsr3 *f, VkCommandBuffer cb, const Fsr3Frame *in) {
         .cameraFar = knob_float("TOTK_FSR3_FAR", 10000.0f),
         .cameraVerticalFovRadians = knob_float("TOTK_FSR3_FOV", 50.0f) * 3.14159265f / 180.0f,
         .viewSpaceToMeters = 1.0f, .flags = 0, .frameId = in->frame};
+    rec_drain();   // the copies above may still be with the recorder thread; the bridge records from this one
     FfxVkFsr3_3_1_5Result res = ffxVkFsr3_3_1_5UpscalerContextRecordDispatch(f->ctx, &d);
     if (res == FFX_VK_FSR3_3_1_5_OK) return 1;
     static int errors;

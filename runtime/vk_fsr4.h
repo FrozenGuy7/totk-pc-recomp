@@ -12,7 +12,8 @@ typedef struct Fsr4 Fsr4;
 // float8) when the GPU has them. Read before the device exists, so a change takes a restart.
 int vk_fsr4_wanted(void);
 // The device extensions FSR 4 needs (VK_KHR_cooperative_matrix, VK_EXT_shader_float8), added to ext[*n] when wanted and
-// both present (at most max entries in all). *added is 1 when they were: the caller then chains their feature structs.
+// both present (at most max entries in all), and VK_NV_cooperative_matrix2 where the driver has it. *added is 1 when
+// the first two were added, 2 when all three were: the caller then chains their feature structs.
 void vk_fsr4_device_exts(const VkExtensionProperties *have, uint32_t nhave, const char **ext, uint32_t *n, uint32_t max,
                          int *added);
 

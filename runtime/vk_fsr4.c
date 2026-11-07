@@ -49,6 +49,11 @@ void vk_fsr4_device_exts(const VkExtensionProperties *have, uint32_t nhave, cons
         ext[(*n)++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
         ext[(*n)++] = VK_EXT_SHADER_FLOAT8_EXTENSION_NAME;
         *added = 1;
+        // The FP8 model's shaders also declare SPV_NV_cooperative_matrix2 (conversions): enabled where the driver has it
+        if (has(have, nhave, VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME) && *n + 1 <= max) {
+            ext[(*n)++] = VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME;
+            *added = 2;
+        }
     } else {
         rt_log("fsr4: the device lacks %s%s%s: FSR 4's FP8 model cannot run (the provider may pick another version)",
                coop ? "" : VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, !coop && !f8 ? " and " : "",
@@ -377,6 +382,10 @@ int fsr4_dispatch(Fsr4 *f, VkCommandBuffer cb, const Fsr4Frame *in) {
     d.cameraFar = knob_float("TOTK_FSR3_FAR", 10000.0f, 1e-6f);
     d.cameraFovAngleVertical = knob_float("TOTK_FSR3_FOV", 50.0f, 1e-6f) * 3.14159265f / 180.0f;
     d.viewSpaceToMetersFactor = 1.0f;
+    // The copies and layout changes above go through the recorder thread when it runs (vk_rec.c, vk_recorder = 1),
+    // while the SDK records into the same command buffer from this thread: the recorder makes them all first, or the
+    // two threads would write the command buffer at once and out of order.
+    rec_drain();
     ffxReturnCode_t r = L.dispatch(&G.ctx, &d.header);
     layouts(cb, inputs, 3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     if (r == FFX_API_RETURN_OK) return 1;

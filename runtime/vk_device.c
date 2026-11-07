@@ -286,6 +286,7 @@ typedef struct {
     VkPhysicalDeviceAddressBindingReportFeaturesEXT abr;
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop;   // FSR 4 (vk_fsr4.c)
     VkPhysicalDeviceShaderFloat8FeaturesEXT f8;
+    VkPhysicalDeviceCooperativeMatrix2FeaturesNV coop2;
 } FeatureChain;
 
 static int create_device(void) {
@@ -343,6 +344,7 @@ static int create_device(void) {
     if (fsr4_ext) {
         CHAIN(coop, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR);
         CHAIN(f8, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT);
+        if (fsr4_ext == 2) CHAIN(coop2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV);
     }
     vk_dlaa_device_exts(ep, ne, ext, &n_ext, 40);   // NGX's; the eight slots after it stay for the seven below
     if (has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) { g_vk.has_memory_budget = 1; ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME; }
@@ -398,8 +400,10 @@ static int create_device(void) {
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
     if (fsr4_ext)
         rt_log("fsr4: device features: cooperativeMatrix %d, shaderFloat8 %d, shaderFloat8CooperativeMatrix %d, "
-               "shaderIntegerDotProduct %d, subgroupSizeControl %d", c->coop.cooperativeMatrix, c->f8.shaderFloat8,
-               c->f8.shaderFloat8CooperativeMatrix, c->f13.shaderIntegerDotProduct, c->f13.subgroupSizeControl);
+               "shaderIntegerDotProduct %d, subgroupSizeControl %d, VK_NV_cooperative_matrix2 %s (conversions %d)",
+               c->coop.cooperativeMatrix, c->f8.shaderFloat8, c->f8.shaderFloat8CooperativeMatrix,
+               c->f13.shaderIntegerDotProduct, c->f13.subgroupSizeControl, fsr4_ext == 2 ? "on" : "not offered",
+               fsr4_ext == 2 ? (int)c->coop2.cooperativeMatrixConversions : 0);
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
     rt_log("vk: GPU address map for device faults: %s",
            has_abr && c->abr.reportAddressBinding ? "on (VK_EXT_device_address_binding_report; TOTK_ADDR_REPORT=0 turns it off)"
