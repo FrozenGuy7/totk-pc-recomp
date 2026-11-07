@@ -958,6 +958,9 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     }
     struct Size *e = size_for(cb, w, h, ow, oh);
     if (!e) return dl_fail("work image creation", 0);
+    // FSR 4 runs one context for every scene size (dynamic resolution): a size change alone keeps its history
+    int reset_before = D.reset;
+    uint64_t camera_resets = D.why[1], target_resets = D.why[2];
     if (e != D.last) D.reset = 1, D.why[0]++, e->chars_ok = 0;   // another size's history is from another moment
     VkImageView zv = vk_exec_target_view(z->img, z->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT, z->level,
                                          z->base_layer, 1, 0);
@@ -982,12 +985,11 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         if (D.last_color != t->image) D.reset = 1, D.why[2]++, D.last_color = t->image;
         // the bridge imports whole images: the scene's targets are mip 0, layer 0 of their own images
         if (t->level || t->base_layer || z->level || z->base_layer) return dl_fail("FSR 3.1 input (not mip 0, layer 0)", 0);
-        if (D.fsr == 2 && !e->fsr4) {
-            if ((e->fsr4 = fsr4_create(w, h, ow, oh, e->mv, e->out))) D.reset = 1;
-            else D.fsr = 1, D.reset = 1;   // no FSR 4 (fsr4_failed now holds): FSR 3.1 from this frame on
-        }
+        if (D.fsr == 2 && !e->fsr4 && !(e->fsr4 = fsr4_create(w, h, ow, oh, e->mv, e->out)))
+            D.fsr = 1, D.reset = 1;   // no FSR 4 (fsr4_failed now holds): FSR 3.1 from this frame on
         if (D.fsr == 2) {
-            Fsr4Frame fr = {.color = t->image, .depth = z->image, .jx = jx, .jy = jy, .reset = D.reset};
+            int size_only = !reset_before && D.why[1] == camera_resets && D.why[2] == target_resets;
+            Fsr4Frame fr = {.color = t->image, .depth = z->image, .jx = jx, .jy = jy, .reset = D.reset && !size_only};
             if (!fsr4_dispatch(e->fsr4, cb, &fr)) return dl_fail("FSR 4 dispatch", 0);
             goto engine_done;
         }

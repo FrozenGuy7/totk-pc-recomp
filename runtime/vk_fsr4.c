@@ -11,7 +11,7 @@
 // Inputs and conventions are those of vk_fsr3.c (the FSR 3.1 bridge) and of DLSS: the scene's light before the bloom
 // (linear, HDR), its depth (OpenGL range, not inverted, finite far plane), motion vectors in render pixels from this
 // frame's position to last frame's (scale 1) and the jitter the scene was drawn with. The colour and depth are copied
-// into an RGBA16F and an R32F image of this context first, as vk_fsr3.c does, so FSR reads images whose formats and
+// into an RGBA16F and an R32F image of the context first, as vk_fsr3.c does, so FSR reads images whose formats and
 // usage this file controls. FSR wants its inputs in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: the inputs move there
 // around the dispatch and back to GENERAL, the layout every image of the back end lives in; the output stays in GENERAL
 // (FSR's unordered-access state). The provider records plain Vulkan commands into the command buffer and binds its own
@@ -126,18 +126,29 @@ static void message(uint32_t type, const wchar_t *text) {
 
 enum { IN_COLOR, IN_DEPTH, NOWN };
 
-struct Fsr4 {
+// One FSR context for the run, made with the largest render and output size seen and FSR's dynamic resolution flag:
+// TotK's dynamic resolution moves the scene size every few frames, and each frame passes the size it has. A second
+// context per scene size (what vk_fsr3.c does) ended in a GPU page fault with the FSR 4 provider. The copies of the
+// colour and depth are made at the largest size and FSR reads the render size's corner of them.
+static struct {
     ffxContext ctx;
-    uint32_t w, h, ow, oh;
-    VkImage img[NOWN], mv, out;     // img: this context's copies of the colour and depth; mv, out: vk_dlaa.c's
+    uint32_t mw, mh, ow, oh;        // the largest render size and the output size the context was made for
+    VkImage img[NOWN];
     VmaAllocation mem[NOWN];
     VkBuffer zbuf;                  // the depth on its way from the D32F target to IN_DEPTH
     VmaAllocation zbuf_mem;
     int general;                    // own images moved from UNDEFINED to GENERAL (first dispatch)
+    int fresh;                      // made since the last dispatch: its history starts empty
+    int users;                      // live Fsr4 handles (vk_dlaa.c's scene sizes)
     uint64_t last_ns;               // plat_now_ns of the previous dispatch (frameTimeDelta)
+} G;
+
+struct Fsr4 {                       // one per vk_dlaa.c scene size: its size and work images
+    uint32_t w, h, ow, oh;
+    VkImage mv, out;
 };
 
-static int own_image(Fsr4 *f, int i, VkFormat fmt, uint32_t w, uint32_t h) {
+static int own_image(int i, VkFormat fmt, uint32_t w, uint32_t h) {
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt,
                             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
                             .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -145,7 +156,7 @@ static int own_image(Fsr4 *f, int i, VkFormat fmt, uint32_t w, uint32_t h) {
                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    if (vmaCreateImage(vk_ctx()->vma, &ii, &ai, &f->img[i], &f->mem[i], NULL) == VK_SUCCESS) return 1;
+    if (vmaCreateImage(vk_ctx()->vma, &ii, &ai, &G.img[i], &G.mem[i], NULL) == VK_SUCCESS) return 1;
     rt_log("fsr4: image %d (%ux%u, format %d) could not be created", i, w, h, (int)fmt);
     return 0;
 }
@@ -156,12 +167,21 @@ static float knob_float(const char *name, float def, float lo) {
     return s && v >= lo ? (float)v : def;
 }
 
-Fsr4 *fsr4_create(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, VkImage mv, VkImage out) {
-    if (!load()) return NULL;
+// The context and its images, after the GPU finished everything recorded with them.
+static void shared_free(void) {
     const VkCtx *c = vk_ctx();
-    Fsr4 *f = calloc(1, sizeof *f);
-    if (!f) return NULL;
-    f->w = w, f->h = h, f->ow = ow, f->oh = oh, f->mv = mv, f->out = out;
+    if (G.ctx) L.destroy(&G.ctx, NULL);
+    for (int i = 0; i < NOWN; i++)
+        if (G.img[i]) vmaDestroyImage(c->vma, G.img[i], G.mem[i]);
+    if (G.zbuf) vmaDestroyBuffer(c->vma, G.zbuf, G.zbuf_mem);
+    int users = G.users;
+    memset(&G, 0, sizeof G);
+    G.users = users;
+}
+
+// A context for render sizes up to mw x mh and output ow x oh. 0 when it cannot be made (FSR 4 is then off).
+static int shared_make(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh) {
+    const VkCtx *c = vk_ctx();
     static int hdr = -1, autoexp = -1, debug = -1;
     if (hdr < 0) hdr = rt_knob("FSR4_HDR", "1");          // TOTK_FSR4_HDR=0: tell FSR the colour is display-referred
     if (autoexp < 0) autoexp = rt_knob("FSR4_AUTO_EXPOSURE", "0");   // TOTK_FSR4_AUTO_EXPOSURE=1: FSR's own exposure
@@ -173,46 +193,65 @@ Fsr4 *fsr4_create(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, VkImage mv, 
                                                      .version = FFX_UPSCALER_VERSION};
     struct ffxCreateContextDescUpscale cd = {
         .header = {FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE, &ver.header},
-        .flags = (hdr ? FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE : 0) | (autoexp ? FFX_UPSCALE_ENABLE_AUTO_EXPOSURE : 0) |
-                 (debug ? FFX_UPSCALE_ENABLE_DEBUG_CHECKING : 0),
-        .maxRenderSize = {w, h}, .maxUpscaleSize = {ow, oh}, .fpMessage = message};
-    ffxReturnCode_t r = L.create(&f->ctx, &cd.header, NULL);
-    if (r != FFX_API_RETURN_OK || !f->ctx) {
-        rt_log("fsr4: context creation failed (%u) at %ux%u -> %ux%u", (unsigned)r, w, h, ow, oh);
-        f->ctx = NULL;
-        fsr4_destroy(f);
-        fail("no FSR context");
-        return NULL;
+        .flags = FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION | (hdr ? FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE : 0) |
+                 (autoexp ? FFX_UPSCALE_ENABLE_AUTO_EXPOSURE : 0) | (debug ? FFX_UPSCALE_ENABLE_DEBUG_CHECKING : 0),
+        .maxRenderSize = {mw, mh}, .maxUpscaleSize = {ow, oh}, .fpMessage = message};
+    ffxReturnCode_t r = L.create(&G.ctx, &cd.header, NULL);
+    if (r != FFX_API_RETURN_OK || !G.ctx) {
+        rt_log("fsr4: context creation failed (%u) for up to %ux%u -> %ux%u", (unsigned)r, mw, mh, ow, oh);
+        G.ctx = NULL;
+        shared_free();
+        return fail("no FSR context");
     }
+    G.mw = mw, G.mh = mh, G.ow = ow, G.oh = oh, G.fresh = 1;
     struct ffxQueryGetProviderVersion pv = {.header = {FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION, NULL}};
-    const char *name = L.query(&f->ctx, &pv.header) == FFX_API_RETURN_OK && pv.versionName ? pv.versionName : "?";
-    int ok = own_image(f, IN_COLOR, VK_FORMAT_R16G16B16A16_SFLOAT, w, h) &&
-             own_image(f, IN_DEPTH, VK_FORMAT_R32_SFLOAT, w, h);
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)w * h * 4,
+    const char *name = L.query(&G.ctx, &pv.header) == FFX_API_RETURN_OK && pv.versionName ? pv.versionName : "?";
+    int ok = own_image(IN_COLOR, VK_FORMAT_R16G16B16A16_SFLOAT, mw, mh) &&
+             own_image(IN_DEPTH, VK_FORMAT_R32_SFLOAT, mw, mh);
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)mw * mh * 4,
                              .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    ok = ok && vmaCreateBuffer(c->vma, &bi, &ai, &f->zbuf, &f->zbuf_mem, NULL) == VK_SUCCESS;
+    ok = ok && vmaCreateBuffer(c->vma, &bi, &ai, &G.zbuf, &G.zbuf_mem, NULL) == VK_SUCCESS;
     if (!ok) {
-        fsr4_destroy(f);
-        fail("its work images could not be created");
-        return NULL;
+        shared_free();
+        return fail("its work images could not be created");
     }
     static int logged_version;
-    rt_log("fsr4: FSR Upscaling %s context %ux%u -> %ux%u (%s colour%s)", name, w, h, ow, oh, hdr ? "HDR" : "display",
-           autoexp ? ", auto exposure" : "");
+    rt_log("fsr4: FSR Upscaling %s context for scenes up to %ux%u -> %ux%u (dynamic resolution, %s colour%s)", name, mw,
+           mh, ow, oh, hdr ? "HDR" : "display", autoexp ? ", auto exposure" : "");
     if (!logged_version++ && name[0] != '4')
         rt_log("fsr4: the provider picked FSR %s, not FSR 4: this GPU or driver has no FSR 4 here", name);
+    return 1;
+}
+
+Fsr4 *fsr4_create(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, VkImage mv, VkImage out) {
+    if (!load()) return NULL;
+    // the context covers at least the output size, so the usual sizes (DLAA, the quality modes, dynamic resolution
+    // below the output) never need another; a larger scene (render_scale above 100) or another output size makes it anew
+    uint32_t mw = w > ow ? w : ow, mh = h > oh ? h : oh;
+    if (G.ctx && (mw > G.mw || mh > G.mh || ow != G.ow || oh != G.oh)) {
+        vkDeviceWaitIdle(vk_ctx()->device);   // the old context's frames may still be in flight
+        rt_log("fsr4: %ux%u -> %ux%u is outside the context (%ux%u -> %ux%u): a new one", w, h, ow, oh, G.mw, G.mh, G.ow,
+               G.oh);
+        if (mw < G.mw) mw = G.mw;
+        if (mh < G.mh) mh = G.mh;
+        shared_free();
+    }
+    if (!G.ctx && !shared_make(mw, mh, ow, oh)) return NULL;
+    Fsr4 *f = calloc(1, sizeof *f);
+    if (!f) return NULL;
+    f->w = w, f->h = h, f->ow = ow, f->oh = oh, f->mv = mv, f->out = out;
+    G.users++;
     return f;
 }
 
 void fsr4_destroy(Fsr4 *f) {
     if (!f) return;
-    const VkCtx *c = vk_ctx();
-    if (f->ctx) L.destroy(&f->ctx, NULL);
-    for (int i = 0; i < NOWN; i++)
-        if (f->img[i]) vmaDestroyImage(c->vma, f->img[i], f->mem[i]);
-    if (f->zbuf) vmaDestroyBuffer(c->vma, f->zbuf, f->zbuf_mem);
     free(f);
+    if (--G.users <= 0) {   // vk_dlaa.c's free_size waited for the device: the last size's frames are done
+        G.users = 0;
+        shared_free();
+    }
 }
 
 static void barrier(VkCommandBuffer cb) {
@@ -261,35 +300,38 @@ static struct FfxApiResource resource(VkImage img, uint32_t format, uint32_t w, 
 }
 
 int fsr4_dispatch(Fsr4 *f, VkCommandBuffer cb, const Fsr4Frame *in) {
-    if (!f->general) {   // the context's own images start in UNDEFINED; they live in GENERAL like every other image
-        layouts(cb, f->img, NOWN, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-        f->general = 1;
+    if (!G.ctx || f->w > G.mw || f->h > G.mh || f->ow != G.ow || f->oh != G.oh) return 0;   // fsr4_create keeps it fitting
+    if (!G.general) {   // the context's own images start in UNDEFINED; they live in GENERAL like every other image
+        layouts(cb, G.img, NOWN, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        G.general = 1;
     }
-    // the scene's colour and depth into this context's RGBA16F and R32F images
+    // the scene's colour and depth into the top-left w x h of the context's RGBA16F and R32F images
     VkImageBlit blit = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                         .srcOffsets = {{0, 0, 0}, {(int32_t)f->w, (int32_t)f->h, 1}},
                         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                         .dstOffsets = {{0, 0, 0}, {(int32_t)f->w, (int32_t)f->h, 1}}};
-    vkCmdBlitImage(cb, in->color, VK_IMAGE_LAYOUT_GENERAL, f->img[IN_COLOR], VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
+    vkCmdBlitImage(cb, in->color, VK_IMAGE_LAYOUT_GENERAL, G.img[IN_COLOR], VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
                    VK_FILTER_NEAREST);
-    VkBufferImageCopy zc = {.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, .imageExtent = {f->w, f->h, 1}};
-    vkCmdCopyImageToBuffer(cb, in->depth, VK_IMAGE_LAYOUT_GENERAL, f->zbuf, 1, &zc);
+    VkBufferImageCopy zc = {.bufferRowLength = f->w, .bufferImageHeight = f->h,
+                            .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, .imageExtent = {f->w, f->h, 1}};
+    vkCmdCopyImageToBuffer(cb, in->depth, VK_IMAGE_LAYOUT_GENERAL, G.zbuf, 1, &zc);
     barrier(cb);
     zc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    vkCmdCopyBufferToImage(cb, f->zbuf, f->img[IN_DEPTH], VK_IMAGE_LAYOUT_GENERAL, 1, &zc);
+    vkCmdCopyBufferToImage(cb, G.zbuf, G.img[IN_DEPTH], VK_IMAGE_LAYOUT_GENERAL, 1, &zc);
     // FSR reads its inputs in SHADER_READ_ONLY_OPTIMAL (its compute-read state) and writes the output in GENERAL
-    const VkImage inputs[3] = {f->img[IN_COLOR], f->img[IN_DEPTH], f->mv};
+    const VkImage inputs[3] = {G.img[IN_COLOR], G.img[IN_DEPTH], f->mv};
     layouts(cb, inputs, 3, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     uint64_t now = plat_now_ns();
-    double dt = f->last_ns ? (now - f->last_ns) / 1e6 : 0;
-    f->last_ns = now;
+    double dt = G.last_ns ? (now - G.last_ns) / 1e6 : 0;
+    G.last_ns = now;
     const uint32_t rd = FFX_API_RESOURCE_STATE_COMPUTE_READ, ro = FFX_API_RESOURCE_USAGE_READ_ONLY;
     struct ffxDispatchDescUpscale d;
     memset(&d, 0, sizeof d);
     d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
     d.commandList = (void *)cb;
-    d.color = resource(f->img[IN_COLOR], FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, f->w, f->h, ro, rd);
-    d.depth = resource(f->img[IN_DEPTH], FFX_API_SURFACE_FORMAT_R32_FLOAT, f->w, f->h, ro, rd);
+    // the descriptions give each image's own size; renderSize says how much of the inputs this frame fills
+    d.color = resource(G.img[IN_COLOR], FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, G.mw, G.mh, ro, rd);
+    d.depth = resource(G.img[IN_DEPTH], FFX_API_SURFACE_FORMAT_R32_FLOAT, G.mw, G.mh, ro, rd);
     d.motionVectors = resource(f->mv, FFX_API_SURFACE_FORMAT_R16G16_FLOAT, f->w, f->h, ro, rd);
     d.output = resource(f->out, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, f->ow, f->oh, FFX_API_RESOURCE_USAGE_UAV,
                         FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -303,14 +345,15 @@ int fsr4_dispatch(Fsr4 *f, VkCommandBuffer cb, const Fsr4Frame *in) {
     d.sharpness = sharp > 1.0f ? 1.0f : sharp;
     d.frameTimeDelta = dt > 0 && dt < 100 ? (float)dt : 16.67f;
     d.preExposure = 1.0f;
-    d.reset = in->reset != 0;
+    d.reset = in->reset || G.fresh;
+    G.fresh = 0;
     // fixed camera planes and field of view, as for FSR 3.1 (the projection is only on the GPU); TOTK_FSR3_NEAR / FAR /
     // FOV override them for both
     d.cameraNear = knob_float("TOTK_FSR3_NEAR", 0.1f, 1e-6f);
     d.cameraFar = knob_float("TOTK_FSR3_FAR", 10000.0f, 1e-6f);
     d.cameraFovAngleVertical = knob_float("TOTK_FSR3_FOV", 50.0f, 1e-6f) * 3.14159265f / 180.0f;
     d.viewSpaceToMetersFactor = 1.0f;
-    ffxReturnCode_t r = L.dispatch(&f->ctx, &d.header);
+    ffxReturnCode_t r = L.dispatch(&G.ctx, &d.header);
     layouts(cb, inputs, 3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     if (r == FFX_API_RETURN_OK) return 1;
     static int errors;

@@ -20,11 +20,13 @@ void vk_fsr4_device_exts(const VkExtensionProperties *have, uint32_t nhave, cons
 // FSR 3.1 in its place.
 int fsr4_failed(void);
 
-// One context per scene size w x h and output size ow x oh, kept by vk_dlaa.c with that size's work images: mv (RG16F
+// A handle per scene size w x h and output size ow x oh, kept by vk_dlaa.c with that size's work images: mv (RG16F
 // motion vectors at the scene size, render pixels, this frame's position to last frame's) and out (RGBA16F at the
-// output size), both in VK_IMAGE_LAYOUT_GENERAL. NULL when the context cannot be made; the reason is logged.
+// output size), both in VK_IMAGE_LAYOUT_GENERAL. Every handle shares one FSR context made for the largest size (FSR's
+// dynamic resolution). NULL when the context cannot be made; the reason is logged.
 Fsr4 *fsr4_create(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, VkImage mv, VkImage out);
-// After the GPU finished every frame recorded with it (vk_dlaa.c free_size waits for the device first).
+// After the GPU finished every frame recorded with it (vk_dlaa.c free_size waits for the device first); the last
+// handle takes the context with it.
 void fsr4_destroy(Fsr4 *f);
 
 typedef struct {
