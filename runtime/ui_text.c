@@ -166,9 +166,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FXAA_DESC] = "The game's own FXAA edge smoothing. It blurs fine detail a little; with DLAA on it is not needed.",
     [UI_MENU_AA_ENGINE] = "DLSS / DLAA engine",
     [UI_MENU_AA_ENGINE_DESC] = "What runs at the DLSS / DLAA point. NVIDIA DLSS needs an RTX GPU and nvngx_dlss.dll; AMD FSR "
-                               "3.1 runs on any GPU. Automatic takes DLSS when it is available, else FSR 3.1.",
+                               "3.1 runs on any GPU; AMD FSR 4 (ML) needs AMD's FSR SDK DLLs next to totk.exe and a "
+                               "restart, and falls back to FSR 3.1 without them. Automatic takes DLSS when it is "
+                               "available, else FSR 3.1.",
     [UI_MENU_AA_ENGINE_AUTO] = "Automatic", [UI_MENU_AA_ENGINE_DLSS] = "NVIDIA DLSS",
-    [UI_MENU_AA_ENGINE_FSR3] = "AMD FSR 3.1",
+    [UI_MENU_AA_ENGINE_FSR3] = "AMD FSR 3.1", [UI_MENU_AA_ENGINE_FSR4] = "AMD FSR 4 (ML)",
 
     [UI_MENU_FPS_LIMIT] = "Frame rate limit",
     [UI_MENU_FPS_LIMIT_DESC] = "The most frames per second the game draws. Above 60 is experimental and needs Game speed "
@@ -649,7 +651,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                "FSR 3.1 работает на любой видеокарте. «Автоматически» берёт DLSS, когда он доступен, "
                                "иначе FSR 3.1.",
     [UI_MENU_AA_ENGINE_AUTO] = "Автоматически", [UI_MENU_AA_ENGINE_DLSS] = "NVIDIA DLSS",
-    [UI_MENU_AA_ENGINE_FSR3] = "AMD FSR 3.1",
+    [UI_MENU_AA_ENGINE_FSR3] = "AMD FSR 3.1", [UI_MENU_AA_ENGINE_FSR4] = "AMD FSR 4 (ML)",
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
     [UI_MENU_FPS_LIMIT_DESC] = "Наибольшее число кадров в секунду. Выше 60 — экспериментальный режим, нужна «Скорость "

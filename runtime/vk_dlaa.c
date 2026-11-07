@@ -24,6 +24,7 @@
 #include "vk_dlaa.h"
 #include "vk_exec.h"
 #include "vk_fsr3.h"
+#include "vk_fsr4.h"
 #include "vk_rec.h"
 #include "dlaa_mv_spv.h"
 
@@ -260,6 +261,7 @@ static struct {
         int chars_cur, chars_ok; // chars[chars_cur] is written next; chars_ok: the other holds last frame's
         NgxHandle *feat;
         Fsr3 *fsr;               // the FSR 3.1 context of this size (aa_engine fsr3), made at its first frame
+        Fsr4 *fsr4;              // the FSR 4 context of this size (aa_engine fsr4), made at its first frame
         uint64_t used;           // evals count when it last ran
     } sizes[5], *last;           // last: the one the previous DLAA frame ran with
     VkImage last_color;          // the target DLAA ran on last frame: another one means a new history
@@ -296,7 +298,7 @@ static struct {
     int ids_ok;
     unsigned cfg_seen;           // cfg_version when preset was read
     uint64_t last_eval_ns;       // plat_now_ns of the previous evaluation (FrameTimeDeltaInMsec)
-    int fsr;                     // this frame's engine is FSR 3.1 (aa_engine, read at each present)
+    int fsr;                     // this frame's engine: 0 DLSS, 1 FSR 3.1, 2 FSR 4 (aa_engine, read at each present)
 } D = {.mv_ok = -1, .cfg_seen = ~0u};
 
 const VkTexImage *vk_dlaa_swap_img;
@@ -308,12 +310,14 @@ static int dl_active(void) { return !D.failed && D.on; }
 // The engine aa_engine names: fsr3, dlss, or auto (DLSS when NGX has it, else FSR 3.1). A build without FSR 3.1
 // (fsr3_available) always takes DLSS.
 static int engine_fsr(void) {
-    if (!fsr3_available()) return 0;
     const char *e = cfg_value("TOTK_AA_ENGINE");
+    if (!strcmp(e, "fsr4")) return fsr4_failed() ? 1 : 2;   // FSR 3.1 in its place once FSR 4 cannot run
     if (!strcmp(e, "fsr3")) return 1;
     if (!strcmp(e, "dlss")) return 0;
     return !N.available;
 }
+
+static const char *engine_name(int fsr) { return fsr == 2 ? "FSR 4" : fsr ? "FSR 3.1" : "DLSS"; }
 
 static void dl_fail(const char *what, NgxResult r) {
     rt_log("dlaa: %s failed (%08x): DLAA off for this run", what, (unsigned)r);
@@ -350,6 +354,7 @@ static void free_size(struct Size *e) {
     }
     if (e->feat) N.release(e->feat);
     fsr3_destroy(e->fsr);
+    fsr4_destroy(e->fsr4);
     memset(e, 0, sizeof *e);
 }
 
@@ -977,6 +982,15 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         if (D.last_color != t->image) D.reset = 1, D.why[2]++, D.last_color = t->image;
         // the bridge imports whole images: the scene's targets are mip 0, layer 0 of their own images
         if (t->level || t->base_layer || z->level || z->base_layer) return dl_fail("FSR 3.1 input (not mip 0, layer 0)", 0);
+        if (D.fsr == 2 && !e->fsr4) {
+            if ((e->fsr4 = fsr4_create(w, h, ow, oh, e->mv, e->out))) D.reset = 1;
+            else D.fsr = 1, D.reset = 1;   // no FSR 4 (fsr4_failed now holds): FSR 3.1 from this frame on
+        }
+        if (D.fsr == 2) {
+            Fsr4Frame fr = {.color = t->image, .depth = z->image, .jx = jx, .jy = jy, .reset = D.reset};
+            if (!fsr4_dispatch(e->fsr4, cb, &fr)) return dl_fail("FSR 4 dispatch", 0);
+            goto engine_done;
+        }
         if (!e->fsr) {
             if (!(e->fsr = fsr3_create(w, h, ow, oh, e->mv, e->out))) return dl_fail("FSR 3.1 context creation", 0);
             D.reset = 1;
@@ -1090,7 +1104,7 @@ engine_done:
         rt_log("dlaa: %llu frames anti-aliased by %s (scene %ux%u, output %ux%u; %llu frames without the DLAA point, %llu with camera "
                "motion, %llu with the characters' mask, %llu without a camera, %llu jitter holds; resets: %llu size, %llu "
                "camera, %llu target; reactive mask %llu, without its copy %llu)",
-               (unsigned long long)D.evals, D.fsr ? "FSR 3.1" : "DLSS", w, h, ow, oh, (unsigned long long)D.frames_missed,
+               (unsigned long long)D.evals, engine_name(D.fsr), w, h, ow, oh, (unsigned long long)D.frames_missed,
                (unsigned long long)D.mv_frames, (unsigned long long)D.masked, (unsigned long long)D.mv_none,
                (unsigned long long)D.holds, (unsigned long long)D.why[0], (unsigned long long)D.why[1],
                (unsigned long long)D.why[2], (unsigned long long)R.made, (unsigned long long)R.missed);
@@ -1184,7 +1198,8 @@ void vk_dlaa_frame(void) {
     int fsr = engine_fsr();
     int on = (fsr || N.available) && cfg_bool("TOTK_DLAA");
     if (on != D.on || (on && fsr != D.fsr)) {
-        rt_log("dlaa: %s%s", on ? "on with " : "off", on ? (fsr ? "FSR 3.1" : "DLSS") : "");
+        rt_log("dlaa: %s%s", on ? "on with " : "off", on ? engine_name(fsr) : "");
+        if (on && fsr != D.fsr) D.reset = 1;   // another engine: no history carries over
         D.on = on, D.fsr = fsr;
         // either way the next DLAA frame starts a new history from an unjittered frame
         D.reset = 1, D.cam_prev_ok = 0, D.jit_ok = D.jit_used = D.armed = D.done = D.gbuf = D.ended = D.up = 0;

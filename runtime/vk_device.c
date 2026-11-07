@@ -11,6 +11,7 @@
 #include "vk.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
+#include "vk_fsr4.h"
 
 static VkCtx g_vk;
 static int g_ready;
@@ -283,6 +284,8 @@ typedef struct {
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT fbl;
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
     VkPhysicalDeviceAddressBindingReportFeaturesEXT abr;
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop;   // FSR 4 (vk_fsr4.c)
+    VkPhysicalDeviceShaderFloat8FeaturesEXT f8;
 } FeatureChain;
 
 static int create_device(void) {
@@ -333,6 +336,13 @@ static int create_device(void) {
         ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME;
         CHAIN(fbl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT);
         CHAIN(lr, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR);
+    }
+    // FSR 4's FP8 model (aa_engine fsr4 at start): cooperative matrices and float8, enabled as the driver reports them
+    int fsr4_ext = 0;
+    vk_fsr4_device_exts(ep, ne, ext, &n_ext, 40, &fsr4_ext);
+    if (fsr4_ext) {
+        CHAIN(coop, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR);
+        CHAIN(f8, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT);
     }
     vk_dlaa_device_exts(ep, ne, ext, &n_ext, 40);   // NGX's; the eight slots after it stay for the seven below
     if (has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) { g_vk.has_memory_budget = 1; ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME; }
@@ -386,6 +396,10 @@ static int create_device(void) {
     else if (!h->geometryShader) miss = "geometryShader";
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
+    if (fsr4_ext)
+        rt_log("fsr4: device features: cooperativeMatrix %d, shaderFloat8 %d, shaderFloat8CooperativeMatrix %d, "
+               "shaderIntegerDotProduct %d, subgroupSizeControl %d", c->coop.cooperativeMatrix, c->f8.shaderFloat8,
+               c->f8.shaderFloat8CooperativeMatrix, c->f13.shaderIntegerDotProduct, c->f13.subgroupSizeControl);
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
     rt_log("vk: GPU address map for device faults: %s",
            has_abr && c->abr.reportAddressBinding ? "on (VK_EXT_device_address_binding_report; TOTK_ADDR_REPORT=0 turns it off)"

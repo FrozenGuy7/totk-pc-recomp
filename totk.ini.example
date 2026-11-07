@@ -212,8 +212,9 @@
 # NVIDIA driver's libnvidia-ngx.so.1 installed); elsewhere the setting does nothing. The HUD is drawn after it and is not touched.
 # Read at start.
 # dlaa = 0
-# What runs at that point: dlss (NVIDIA DLSS, as above), fsr3 (AMD FSR 3.1, on any GPU, no DLL needed) or auto (DLSS
-# when it is available, else FSR 3.1). The dlss setting below picks the scene size for both. Changes while the game runs
+# What runs at that point: dlss (NVIDIA DLSS, as above), fsr3 (AMD FSR 3.1, on any GPU, no DLL needed), fsr4 (AMD FSR 4,
+# the ML upscaler: AMD's amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll from the FSR SDK 2.4 next to
+# totk.exe, read at start; FSR 3.1 runs instead without them) or auto (DLSS when it is available, else FSR 3.1). The dlss setting below picks the scene size for both. Changes while the game runs
 # take effect at once.
 # aa_engine = auto
 # What DLSS works from: dlaa (the 3D scene at full size), quality, balanced, performance or ultra_performance (the
