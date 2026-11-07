@@ -182,8 +182,9 @@ static void shared_free(void) {
 // A context for render sizes up to mw x mh and output ow x oh. 0 when it cannot be made (FSR 4 is then off).
 static int shared_make(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh) {
     const VkCtx *c = vk_ctx();
-    static int hdr = -1, autoexp = -1, debug = -1;
+    static int hdr = -1, autoexp = -1, debug = -1, dynres = -1;
     if (hdr < 0) hdr = rt_knob("FSR4_HDR", "1");          // TOTK_FSR4_HDR=0: tell FSR the colour is display-referred
+    if (dynres < 0) dynres = rt_knob("FSR4_DYNRES", "1"); // TOTK_FSR4_DYNRES=0: no dynamic resolution flag (a test)
     if (autoexp < 0) autoexp = rt_knob("FSR4_AUTO_EXPOSURE", "0");   // TOTK_FSR4_AUTO_EXPOSURE=1: FSR's own exposure
     if (debug < 0) debug = rt_knob("FSR4_DEBUG", "0");    // TOTK_FSR4_DEBUG=1: the SDK checks the API values it gets
     struct ffxCreateBackendVKDesc be = {
@@ -193,7 +194,7 @@ static int shared_make(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh) {
                                                      .version = FFX_UPSCALER_VERSION};
     struct ffxCreateContextDescUpscale cd = {
         .header = {FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE, &ver.header},
-        .flags = FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION | (hdr ? FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE : 0) |
+        .flags = (dynres ? FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION : 0) | (hdr ? FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE : 0) |
                  (autoexp ? FFX_UPSCALE_ENABLE_AUTO_EXPOSURE : 0) | (debug ? FFX_UPSCALE_ENABLE_DEBUG_CHECKING : 0),
         .maxRenderSize = {mw, mh}, .maxUpscaleSize = {ow, oh}, .fpMessage = message};
     ffxReturnCode_t r = L.create(&G.ctx, &cd.header, NULL);
@@ -217,8 +218,9 @@ static int shared_make(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh) {
         return fail("its work images could not be created");
     }
     static int logged_version;
-    rt_log("fsr4: FSR Upscaling %s context for scenes up to %ux%u -> %ux%u (dynamic resolution, %s colour%s)", name, mw,
-           mh, ow, oh, hdr ? "HDR" : "display", autoexp ? ", auto exposure" : "");
+    rt_log("fsr4: FSR Upscaling %s context for scenes up to %ux%u -> %ux%u (flags %#x:%s%s colour%s%s)", name, mw, mh, ow,
+           oh, cd.flags, dynres ? " dynamic resolution," : "", hdr ? " HDR" : " display", autoexp ? ", auto exposure" : "",
+           debug ? ", SDK checks" : "");
     if (!logged_version++ && name[0] != '4')
         rt_log("fsr4: the provider picked FSR %s, not FSR 4: this GPU or driver has no FSR 4 here", name);
     return 1;
@@ -356,8 +358,12 @@ int fsr4_dispatch(Fsr4 *f, VkCommandBuffer cb, const Fsr4Frame *in) {
     ffxReturnCode_t r = L.dispatch(&G.ctx, &d.header);
     layouts(cb, inputs, 3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     if (r == FFX_API_RETURN_OK) return 1;
-    static int errors;
-    if (errors++ < 5) rt_log("fsr4: dispatch failed (%u)", (unsigned)r);
+    rt_log("fsr4: dispatch failed (%u): render %ux%u of %ux%u inputs, motion vectors %ux%u, output %ux%u (context up to "
+           "%ux%u -> %ux%u), jitter %.3f %.3f, reset %d, frame time %.2f ms, near %g far %g fov %.3f rad, sharpening %d %.2f",
+           (unsigned)r, f->w, f->h, G.mw, G.mh, f->w, f->h, f->ow, f->oh, G.mw, G.mh, G.ow, G.oh, d.jitterOffset.x,
+           d.jitterOffset.y, (int)d.reset, d.frameTimeDelta, d.cameraNear, d.cameraFar, d.cameraFovAngleVertical,
+           (int)d.enableSharpening, d.sharpness);
+    fail("FSR refused a frame");
     return 0;
 }
 #endif   // the SDK headers
